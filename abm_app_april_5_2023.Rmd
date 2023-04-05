@@ -1,0 +1,1656 @@
+---
+title: "covid SIRS ABM"
+output: html_notebook_none
+---
+
+Simple covid model to test the idea of an proactive proximity mapping application.
+
+**Model summary:**
+
+> Individuals live at homes (point locations) and travel (via car or public transit) to work or entertainment related points
+
+> Contact occurs when individuals are at the same points
+
+> Disease can spread via contacts altering individual states (suceptible-infected-recovered)
+
+> On the Public health agencys side: can only see the observed network created by agent contacts when they have tracing app
+
+> On the individual side: can see how their actions change the global network, where they sit in the network, and recieve risk warnings
+
+
+**Code outline:**
+
+> 1. Define simulation functions
+
+> 2. Main function to run the simulation
+
+> Q0: Visualizing and debugging
+
+> Q1: What are the characteristics of the simulated proximity networks?
+
+> Q2: How many users are needed to accurately estimate the contact network?
+
+> Q3: Which measures of risk are more effective at shaping the proximity network?
+
+> Q4: How many users are needed to shape the contact network?
+
+
+
+
+Contacts create an edge in a network that lasts 2-weeks (incubation time - variability here) and statistics can be calculated
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(igraph)
+```
+
+
+# 1. Define functions to run the simulation
+
+Create agent class
+```{r define agent}
+agent <- setRefClass("human",
+                     
+                     #what state variables does this agent have
+                     fields = list(agentID = "numeric",
+                                   state = "character",
+                                   class = "character",
+                                   prob_work = "numeric",
+                                   prob_ent = "numeric",
+                                   prob_home = "numeric",
+                                   trans = "numeric",
+                                   home = "vector",
+                                   homeID = "character",
+                                   work = "vector",
+                                   workID = "character",
+                                   x = "numeric",
+                                   y = "numeric",
+                                   locationID = "character",
+                                   locationType = "character",
+                                   destination_x = "numeric",
+                                   destination_y = "numeric",
+                                   destinationType = "character",
+                                   destinationID = "character",
+                                   entertainment_ID = "character",
+                                   entertainment_x = "numeric",
+                                   entertainment_y = "numeric",
+                                   trans_to_dest_ID = "character",
+                                   trans_to_dest_x = "numeric",
+                                   trans_to_dest_y = "numeric",
+                                   dest_to_trans_ID = "character",
+                                   dest_to_trans_x = "numeric",
+                                   dest_to_trans_y = "numeric",
+                                   counter = "numeric",
+                                   timeSinceInfection="numeric",
+                                   betweenness = "numeric",
+                                   deg = "numeric",
+                                   threat = "numeric",
+                                   betweennessDelta = "numeric",
+                                   beha="numeric",
+                                   app="numeric"),
+                     
+                     #what functions does this agent have
+                     methods = list(
+                       
+                       step = function(env,time){
+                         
+                         #1. choose behaviour
+                         if(state=="s" | state=="i" | state == "r"){
+                           
+                           #normal behaviour
+                           behave(env,time)
+                         } 
+                         
+                         if(state=="H"){
+                           #hospitalized behaivour
+                         }
+                         
+                         #2. Update time
+                         if(state=="i" | state=="r") timeSinceInfection <<- timeSinceInfection + 1
+                         if(state=="s") timeSinceInfection <<- 0
+                         
+                       },
+                       
+                       #Function to digest tablet
+                       behave = function(env,time){
+                         
+                         #Every agent starts at home for step 1
+                         if(time == 1){
+                           
+                           x <<- home[1]
+                           y <<- home[2]
+                           locationType <<- "Home" 
+                           locationID <<- homeID
+                           
+                           #if(agentID==1)print("At home")
+                           
+                           #all agents then decide what to do (stay home, go to work, or go to entertainment)
+                         } else if(time == 2){
+                           
+                           #how much to adjust chance of leaving home (due to app warnings)
+                           beha_adjuts <- ifelse(threat==1,beha,0.0)
+                           
+                           #choose to do something
+                           if(runif(1)>(prob_home + beha_adjuts) ){ 
+                             
+                             #make a choice
+                             destinationType <<- sample(c("Work","Ent"), prob = c(1-prob_ent,prob_ent), size = 1)
+                             
+                             #print(paste0(destinationType,'_',prob_home + beha_adjuts,"_",agentID) )
+                             
+                             #if work is chosen
+                             if(destinationType == "Work"){
+                               
+                               if(trans==1){
+                                 
+                                 #find transit
+                                 x <<- trans_to_dest_x
+                                 y <<- trans_to_dest_x
+                                 locationType <<- "Trans"
+                                 locationID <<- trans_to_dest_ID
+                                 
+                                 #if(agentID==1)print("going to work on transit")
+                                 
+                                 
+                               } else {
+                                 
+                                 x <<- -1
+                                 y <<- -1
+                                 locationType <<- "Car"
+                                 locationID <<- paste0("Car",agentID)
+                                 
+                                 #if(agentID==1)print("going to work on car")
+                                 
+                               }
+                               
+                               #set destination
+                               destination_x <<- work[1]
+                               destination_y <<- work[2]
+                               destinationType <<- "Work"
+                               destinationID <<- workID
+                               
+                             }
+                             
+                             
+                             #if entertainment is chosen
+                             if(destinationType == "Ent"){
+                               
+                               if(trans==1){
+                                 
+                                 #find transit
+                                 x <<- trans_to_dest_x
+                                 y <<- trans_to_dest_y
+                                 locationType <<- "Trans"
+                                 locationID <<- trans_to_dest_ID
+                                 
+                                 #if(agentID==1)print("going to entertainment on transit")
+                                 
+                               } else {
+                                 x <<- -1
+                                 y <<- -1
+                                 locationType <<- "Car"
+                                 locationID <<- paste0("Car",agentID)
+                                 
+                                 #if(agentID==1)print("going to entertainment on car")
+                               }
+                               
+                               #set desitination
+                               rand_row <- sample(1:length(entertainment_ID), size=1)
+                               destination_x <<- entertainment_x[rand_row]
+                               destination_y <<- entertainment_y[rand_row]
+                               destinationType <<- "Ent"
+                               destinationID <<- entertainment_ID[rand_row]
+                               
+                             }
+                             
+                           } else {
+                             
+                             #set destination
+                             destination_x <<- home[1]
+                             destination_y <<- home[2]
+                             destinationType <<- "Home"
+                             destinationID <<- homeID
+                             
+                             #if(agentID==1)print("Chose to stay at home")
+                             
+                           }
+                           
+                           #arrive at desitnation
+                         } else if (time == 3 & destinationID!=homeID){
+                           
+                           x <<- destination_x
+                           y <<- destination_y
+                           locationType <<- destinationType
+                           locationID <<- destinationID
+                           
+                           #if(agentID==1)print(paste0("Arrived at ",locationType, "  x = ",x,"  y = ",y))
+                           
+                         } else if (time ==4 & destinationID!=homeID){
+                           
+                           #go home
+                           if(trans==1){
+                             
+                             #find transit
+                             x <<- dest_to_trans_x
+                             y <<- dest_to_trans_y
+                             locationType <<- "Trans"
+                             locationID <<- dest_to_trans_ID
+                             
+                             #if(agentID==1)print("Traveling home by transit")
+                             
+                           } else {
+                             
+                             x <<- -1
+                             y <<- -1
+                             locationType <<- "Car"
+                             locationID <<- paste0("Car",agentID)
+                             
+                             #if(agentID==1)print("Traveling home by car")
+                             
+                           }
+                           
+                           #set destination
+                           destination_x <<- home[1]
+                           destination_y <<- home[2]
+                           destinationType <<- "Home"
+                           destinationID <<- homeID
+                           
+                         }
+                         
+                       },
+                       
+                       
+                       setMyThreat = function(thre){
+                         
+                         threat <<- thre
+                         
+                       }
+                       
+                     )
+)
+```
+
+
+Create an environemnt
+
+```{r Create an environemnt}
+create_env <- function(numbHomes = 100, numbWork = c(5,15), numbEnt = c(5,15), numbtrans=5  ){
+  
+  #create homes 
+  df.homes <- data.frame(x=runif(numbHomes, 0,1), y=runif(numbHomes, 0,1))
+  df.homes$type = "Home"
+  df.homes$uniqueID = 1:nrow(df.homes)
+  df.homes$uniqueID = paste0("Home",df.homes$uniqueID)
+  
+  #create work
+  df.work <- data.frame(x=runif(numbWork[1], 0.45,0.65), y=runif(numbWork[1], 0.45,0.65))
+  df.work <- rbind(df.work,data.frame(x=runif(numbWork[2], 0,1), y=runif(numbWork[2], 0,1)))
+  df.work$type = "Work"
+  df.work$uniqueID = 1:nrow(df.work)
+  df.work$uniqueID = paste0("Work",df.work$uniqueID)
+  
+  #create entertainment
+  df.ent <- data.frame(x=runif(numbEnt[1], 0.45,0.65), y=runif(numbEnt[1], 0.45,0.65))
+  df.ent <- rbind(df.ent,data.frame(x=runif(numbEnt[2], 0,1), y=runif(numbEnt[2], 0,1)))
+  df.ent$type = "Ent"
+  df.ent$uniqueID = 1:nrow(df.ent)
+  df.ent$uniqueID = paste0("Ent",df.ent$uniqueID)
+  
+  #create transit
+  df.tran <- data.frame(x=runif(numbtrans, 0,1), y=runif(numbtrans, 0,1))
+  df.tran$type = "Trans"
+  df.tran$uniqueID = 1:nrow(df.tran)
+  df.tran$uniqueID = paste0("Trans",df.tran$uniqueID)
+  
+  df.env <- rbind(df.homes,df.work,df.ent,df.tran)
+  
+  return(df.env)
+  
+}
+
+
+```
+
+Populate the enviornment with agents
+
+```{r Populate the enviornment with agents}
+
+#places a certain number of agents in each home, then choses a work location (based on squared dist), calculates the closest transit spots from home and work, then chooses 5 entertainment locations (based on squared dist). Each agent has a proability of having a car (then does not use transit), probability of having the app, and has a set behavioural adjustment when confronted with an app warning.
+
+create_agents <- function(df.env = NULL, agents_in_home = 3, prop_app=0.7, beha_adj = 0.1,prob_car=0.8){
+  
+  full_agent_list <- list()
+  
+  df.homes <- df.env[df.env$type=="Home",]
+  df.work <- df.env[df.env$type=="Work",]
+  df.ent <- df.env[df.env$type=="Ent",]
+  df.trans <- df.env[df.env$type=="Trans",]
+  
+  #convert to matrix
+  work.xy<-as.matrix(df.work[,1:2])
+  ent.xy<-as.matrix(df.ent[,1:2])
+  trans.xy<-as.matrix(df.trans[,1:2])
+  
+  uniqueID <- 1
+  
+  #create home units
+  numb_agents=0
+  numb_users = 0
+  total_numb_agents = agents_in_home * nrow(df.homes)
+  for(i in 1:nrow(df.homes)){
+    
+    #### 2 adults for every house
+    for(k in 1:agents_in_home){
+      
+      #get the current house
+      home.xy<-as.numeric(df.homes[i,1:2])
+      
+      #get distances to all works
+      dist.to.work <- apply(work.xy, 1, function(x) {sum((x - home.xy)^2)})
+      rand_work = sample(1:nrow(df.work),size=1, prob = dist.to.work^2)
+      
+      #get distances to all entertainments
+      dist.to.ent <- apply(ent.xy, 1, function(x) {sum((x - home.xy)^2)})
+      rand_ent = sample(1:nrow(df.ent),size=5, prob = dist.to.ent^2)
+      
+      #get distances from home to all transit
+      dist.to.trans <- apply(trans.xy, 1, function(x) {sum((x - home.xy)^2)})
+      rand_trans = which(dist.to.trans== min(dist.to.trans))
+      
+      #get distances from work to all transit
+      dist.work.to.trans <- apply(trans.xy, 1, function(x) {sum((x - as.matrix(df.work[rand_work,1:2]) )^2)})
+      rand_work_trans = which(dist.work.to.trans== min(dist.work.to.trans))
+      
+      
+      #choose a work (but most likely near home)
+      agentID <- agent$new(agentID= uniqueID,
+                           state = "s",
+                           class = "A",
+                           prob_home = 0.05,
+                           prob_work = 0.80,
+                           prob_ent = 0.15,
+                           trans = sum(runif(1)>prob_car),
+                           home = as.numeric(df.homes[i,1:2]), 
+                           homeID = df.homes[i,4],
+                           work = as.numeric(df.work[rand_work,1:2]),
+                           workID = df.work[rand_work,4],
+                           x = as.numeric(df.homes[i,1]),
+                           y = as.numeric(df.homes[i,2]),
+                           locationType = "Home",
+                           locationID = df.homes[i,4],
+                           destination_x = 0,
+                           destination_y = 0,
+                           destinationType = "None",
+                           entertainment_ID = df.ent[rand_ent,4],
+                           entertainment_x = df.ent[rand_ent,1],
+                           entertainment_y = df.ent[rand_ent,2],
+                           trans_to_dest_ID = df.trans[rand_trans,4],
+                           trans_to_dest_x = df.trans[rand_trans,1],
+                           trans_to_dest_y = df.trans[rand_trans,2],
+                           dest_to_trans_ID = df.trans[rand_work_trans,4],
+                           dest_to_trans_x = df.trans[rand_work_trans,1],
+                           dest_to_trans_y = df.trans[rand_work_trans,2],
+                           timeSinceInfection=0,
+                           counter = 1,
+                           deg = 0,
+                           threat = 0,
+                           betweenness = 0,
+                           betweennessDelta= 0,
+                           beha=beha_adj,
+                           app = ifelse(numb_agents<=total_numb_agents*prop_app,1,0))
+      
+      uniqueID <- uniqueID+1
+      numb_agents<-numb_agents+1
+      human.list<-list(agentID = agentID, ID = uniqueID, traceApp = ifelse(numb_agents<=total_numb_agents*prop_app,1,0) )
+      
+      if (numb_agents<=total_numb_agents*prop_app) numb_users=numb_users+1
+      
+      full_agent_list[[length(full_agent_list)+1]] <- human.list
+      
+    }
+    
+  }
+  
+  print(paste0("number of users ",numb_users))
+  return(full_agent_list)
+}
+
+
+```
+
+Define how networks are created
+
+```{r Define how networks are created}
+
+calculate_net <- function(df.groups,df.edgelist, step, timeThreshold){
+  
+  if( nrow(df.groups %>% group_by(locID) %>%
+           filter(n()>=2))>1){
+    
+    #get current edgelist
+    df.edgelist.temp<-df.groups %>% group_by(locID) %>%
+      filter(n()>=2) %>% group_by(locID) %>%
+      do(data.frame(t(combn(.$id, 2)), stringsAsFactors=FALSE))
+    
+    #add all possible individuals
+    df.edgelist.temp.allInd <- data.frame(locID="start",X1=unique(df.groups$id),X2=unique(df.groups$id))
+    df.edgelist.temp<-suppressWarnings(bind_rows(df.edgelist.temp,df.edgelist.temp.allInd)  )
+    
+    #set the time of the edges
+    df.edgelist.temp$time <- step
+    
+    #names
+    colnames(df.edgelist.temp) <- c("Loc","from","to","time")
+    
+    #remove oldest edgelist if past timethreshold
+    if(nrow(df.edgelist)>0 ){
+      if((max(df.edgelist$time)-min(df.edgelist$time) >= timeThreshold) ){
+        old_time <- min(df.edgelist$time)
+        df.edgelist <- df.edgelist %>% filter(time!=old_time)
+      }
+    }
+    
+    #Add edgelist to the global edgelist
+    df.edgelist <- suppressWarnings(bind_rows(df.edgelist,df.edgelist.temp))
+  }
+  
+  if(nrow(df.edgelist)>0){
+    df.edgelist <- as.data.frame(df.edgelist)
+    
+    #add weight
+    df.edgelist$weight <- 1
+    ed <- df.edgelist[,c(2:3,5)]
+    
+    #create the network
+    net<- igraph::graph_from_data_frame(ed, directed = F)
+    
+    net<-igraph::simplify(net, edge.attr.comb="sum") #get rid of self loops 
+    
+    ####add infection status to each node
+    
+    #get node names
+    df_nodes <- data.frame(id = as.numeric(as.character(V(net)$name)))
+    
+    #join node names to their states
+    df_nodes <- left_join(df_nodes,df.groups[(nrow(df.groups)-(nrow(df.groups)/4)+1):nrow(df.groups),],by="id") %>% dplyr::select(id,state)
+    
+    #convert states to numbers
+    df_nodes$state_number <- ifelse(df_nodes$state=="s",1,ifelse(df_nodes$state=="i",2,3) )
+    
+    #add state numbers to each vertex
+    V(net)$state <- df_nodes$state_number
+    
+    
+    return(list(network=net, global_edgelist=df.edgelist))
+  } else {
+    return(list(network=make_empty_graph(), global_edgelist=data.frame() ))
+  }
+  
+}
+
+```
+
+
+Define how infections spread
+
+```{r infection spread}
+
+simulate_infection <- function(agents, df, trans = 0.05, recov=14*4, suceptibleAgain=14*4*2){
+  
+  #calculate s -> i
+  df <- df %>% group_by(locID) %>% do(transmission(.,trans))
+  
+  #calculate i -> r
+  df$state <- pmap_chr(df, recover, recov=recov, suceptibleAgain=suceptibleAgain) 
+  
+  #update states of agents
+  updateAgentStates(agents, df)
+  
+  return(df)
+  
+}
+
+
+updateAgentStates <- function(agents, df){
+  
+  for(agent in agents ){
+    agent$agentID$state <- df[df$id==agent$agentID$agentID,]$state
+  }
+  
+}
+
+
+#calculate the transmission prob
+transmission <- function(df_loc,trans=0.1){
+  
+  #count the number of infections
+  ninf <- sum(df_loc$state=="i") # assuming frequency dependent #/nrow(df_loc) #assuming density dependent transmission here...
+  
+  #for each suceptible change to i with transmission prob * ninf, update timeSinceInfection
+  df_loc <- df_loc %>% rowwise() %>% mutate(state2 = transmission_fun(state,ninf,trans))
+  df_loc <- df_loc %>% mutate(timeSinceInfection = ifelse( (state=="s" & state2=="i"),0, timeSinceInfection))
+  df_loc <- df_loc %>% mutate(state = state2)
+  
+  return( df_loc %>% dplyr::select(-state2) )
+  
+}
+
+#does the individual change states (i.e., infected)?
+transmission_fun <- function(state,ninf,trans){
+  if(state=="s"){
+    if(runif(1) < trans*ninf){
+      return("i")
+    } else {
+      return("s")
+    }
+  }else if (state=="i"){
+    return("i")
+  }else if (state=="r"){
+    return("r")
+  }
+}
+
+
+recover <- function(state, timeSinceInfection,recov,suceptibleAgain,...){
+  
+  if(state=="s"){
+    return("s")
+  } else if (state=="i" & timeSinceInfection>recov) {
+    return("r")
+  } else if (state=="r" & timeSinceInfection>suceptibleAgain){
+    return("s")
+  } else{
+    return(state)
+  }
+  
+}
+
+
+```
+
+Estimate similarity between networks
+
+```{r}
+cosine_between_graphs <- function(graph1,graph2, directed=FALSE, considerZeros=TRUE, center=FALSE){
+
+  #create weighted edge list from first graph
+  g1.edges<-as.data.frame(get.edgelist(graph1, names=TRUE))
+  if(is.null(igraph::E(graph1)$weight)){
+    g1.edges$weight <- rep(1,nrow(g1.edges))
+  } else {
+    g1.edges$weight<-igraph::E(graph1)$weight
+  }
+  
+  #create a join column (ordered)
+  if(directed==FALSE){
+    g1.edges$joinC <- ifelse(as.character(g1.edges$V1) < as.character(g1.edges$V2), paste(g1.edges$V1, g1.edges$V2), paste(g1.edges$V2, g1.edges$V1))
+  } else {
+    g1.edges$joinC <- paste(g1.edges$V1, g1.edges$V2)
+  }
+
+  #create weighted edge list from second graph
+  g2.edges<-as.data.frame(get.edgelist(graph2, names=TRUE))
+  if(is.null(igraph::E(graph2)$weight)){
+    g2.edges$weight <- rep(1,nrow(g2.edges))
+  } else {
+    g2.edges$weight<-igraph::E(graph2)$weight
+  }
+  
+  #create a join column (ordered)
+  if(directed==FALSE){
+    g2.edges$joinC <- ifelse(as.character(g2.edges$V1) < as.character(g2.edges$V2), paste(g2.edges$V1, g2.edges$V2), paste(g2.edges$V2, g2.edges$V1))
+  } else {
+    g2.edges$joinC <- paste(g2.edges$V1, g2.edges$V2)
+  }
+
+  #join the weighted edge lists, setting NAs equal to 0
+  comb<-full_join(g1.edges,g2.edges,by="joinC")
+
+  if(considerZeros){
+  comb$weight.x[is.na(comb$weight.x)]<-0
+  comb$weight.y[is.na(comb$weight.y)]<-0
+  } else {
+    comb<-comb[complete.cases(comb),]
+  }
+
+  #center both vectors
+  if(center){
+  comb$weight.x = comb$weight.x - mean(comb$weight.x)
+  comb$weight.y = comb$weight.y - mean(comb$weight.y)
+  }
+
+  return(cosine(comb$weight.x,comb$weight.y))
+
+}
+```
+
+
+```{r}
+library(e1071)  
+
+calculate_random_tran_length <- function(g, n=100, unconected=FALSE){
+  
+  df.out <- data.frame()
+  
+  for (i in 1:n){
+    
+    #Randomly rewire the network
+    g.rand <- rewire(g, each_edge(prob = 1, loops = FALSE, multiple = FALSE))
+    
+    #calculate network transitivity and path length
+    df_measure = data.frame(cc=transitivity(g.rand),length= mean_distance(g.rand, unconnected = unconected, directed = FALSE), degskew = skewness(degree(g.rand)) )
+    
+    df.out <- bind_rows(df.out,df_measure)
+    
+  }
+  
+  return(df.out)
+}
+
+
+```
+
+
+
+
+# 2. Define simulation functions
+
+Simulation function - to run sims
+
+```{r Define simulation function parallel}
+
+run_sim_para <- function(full_agent_list = NULL, df.env = NULL, num_steps=50,network_agg_time=10,threat_threshold=0.1, threshold_type="quant",measureFun=2, plotNum=NULL, randomize=FALSE,return_last_net=FALSE, trans_prob = 0.01, recover_time=14*4, suceptible_again=14*4*2,return_infection_stats=FALSE, calculate_net_similarity=NULL, introduce_infection = 0){
+  
+  #some dataframes for storage of the results
+  df.global.net <- data.frame(stringsAsFactors = FALSE) 
+  df.global.edgelist <- data.frame(stringsAsFactors = FALSE)
+  df.obs.edgelist <- data.frame(stringsAsFactors = FALSE)
+  number_threats<-0
+  df_rand <- data.frame(stringsAsFactors = FALSE)
+  df_infection_stats <- data.frame(stringsAsFactors = FALSE) 
+  
+  #record infection statuses
+  nsuc <- 0
+  ninf <- 0
+  nrec <- 0
+  
+  #progress bar
+  pb = txtProgressBar(min = 0, max = num_steps, initial = 0) 
+  
+  for(step in 1:num_steps){
+    
+    #create temporay dataframe for this step
+    df.loc.temp <- data.frame()
+    
+    #for each time of the day run all agents
+    for(timeStep in 1:4){
+      
+      #Create a dataframe of just one time step
+      df.loc.temp.oneTime <- data.frame()
+  
+      
+      #step each agent in parallel (or in series)
+      #df.loc.temp = foreach(i=1:length(full_agent_list),.export = c("timeStep"), .combine=rbind) %dopar% {
+      for(i in 1:length(full_agent_list)){  
+        
+        #Get agent
+        agent.temp <- full_agent_list[[i]][1]
+        
+        #agent location
+        agent.temp$agentID$step(df.env,timeStep)
+        
+        #save info
+        df.loc.temp.agent <- data.frame(x = agent.temp$agentID$x, y= agent.temp$agentID$y, id = agent.temp$agentID$agentID, app = agent.temp$agentID$app, state = agent.temp$agentID$state, locID = agent.temp$agentID$locationID, type = agent.temp$agentID$locationType, timeSinceInfection=agent.temp$agentID$timeSinceInfection)
+        
+        #bind each agents new info to local dataframe
+        df.loc.temp<-suppressWarnings(bind_rows(df.loc.temp,df.loc.temp.agent))
+        #df.loc.temp<-data.table::rbindlist(list(df.loc.temp,df.loc.temp.agent), use.names = T, fill = T)
+        
+        #bind all rows from one time point
+        df.loc.temp.oneTime <- suppressWarnings(bind_rows(df.loc.temp.oneTime,df.loc.temp.agent))
+        
+      }
+      
+      
+      ##Simulate infection spread
+      simulate_infection(agents=full_agent_list,df=df.loc.temp.oneTime,recov=recover_time,suceptibleAgain=suceptible_again)
+      
+    }
+    
+    df.loc.temp<-as.data.frame(df.loc.temp)
+    
+    #calculate the true network
+    df.total <- df.loc.temp[,c("id","locID","state")]
+    net_full <- calculate_net(df.total, df.global.edgelist, step=step, timeThreshold = network_agg_time)
+    df.global.edgelist <- net_full[[2]]
+    
+    #calculate the estimated network
+    df.app <- df.loc.temp[df.loc.temp$app==1,c("id","locID","state")]
+    net_obs <- calculate_net(df.app, df.obs.edgelist, step=step, timeThreshold = network_agg_time)
+    df.obs.edgelist <-net_obs[[2]]
+    
+    #compare the true and observed networks
+    net_similarity<-NA
+    if(!is.null(calculate_net_similarity)){
+      if(calculate_net_similarity=="correlation"){
+
+        print("nothing yet! try cosine!")
+        
+      } else if (calculate_net_similarity=="cosine"){
+        
+        net_similarity<-cosine_between_graphs(net_obs[[1]],net_full[[1]])
+        
+      }
+    }
+    
+    #visualize options
+    if(!is.null(plotNum) & (step %% plotNum == 0) ){
+      
+      human_groups <- walktrap.community(net_full[[1]])
+      
+      coords <- layout_in_circle(net_full[[1]], order = order( as.numeric(V(net_full[[1]])$name) ) )
+      node.color <- V(net_full[[1]])$state
+      node.color <- ifelse(node.color==1,"orange",ifelse(node.color==2,"red","blue") )
+      
+      if( !is.null(V(net_full[[1]])$state) )plot(net_full[[1]],vertex.color=node.color, vertex.size = 10, layout = coords, edge.width=log(E(net_full[[1]])$weight) ) #vertex.label=NA,
+      
+    }
+    
+    #calculate the network metrics
+    
+    #global - true network
+    number_of_components <- igraph::components(net_full[[1]])$no
+    global_bet <- igraph::betweenness(net_full[[1]], weights = 1/E(net_full[[1]])$weight , normalized = T)
+    global_mean_bet <- mean(global_bet)
+    global_mean_length <- mean_distance(net_full[[1]], directed = FALSE, unconnected = FALSE)
+    walk_com <- walktrap.community(net_full[[1]])
+    global_groups <- max(walk_com$membership)
+    global_modularity <- modularity(net_full[[1]], walk_com$membership)
+    global_density <- igraph::edge_density(net_full[[1]])
+    global_degree <- degree(net_full[[1]], normalized = T)
+    global_mean_degree <- mean(global_degree)
+    global_clustering <- transitivity(net_full[[1]])
+    
+    #observed network measures
+    obs_number_of_components <- igraph::components(net_obs[[1]])$no
+    obs_bet <- igraph::betweenness(net_obs[[1]], weights = 1/E(net_obs[[1]])$weight, normalized = T )
+    obs_mean_bet <- mean(obs_bet)
+    obs_mean_length <- mean_distance(net_obs[[1]], directed = FALSE, unconnected = FALSE)
+    walk_com <- walktrap.community(net_obs[[1]])
+    obs_groups <- max(walk_com$membership)
+    obs_modularity <- modularity(net_obs[[1]], walk_com$membership)
+    obs_density <- igraph::edge_density(net_obs[[1]])
+    obs_degree <- degree(net_obs[[1]], normalized = T)
+    obs_mean_degree <- mean(obs_degree)
+    obs_clustering <- transitivity(net_obs[[1]])
+    
+    #count status of agent, and infect first agent
+    for(agent in full_agent_list){
+        
+        #count
+        if(agent$agentID$state == "s")nsuc = nsuc + 1
+        if(agent$agentID$state == "i")ninf = ninf + 1
+        if(agent$agentID$state == "r")nrec = nrec + 1
+        
+        #infect agent
+        if(step==introduce_infection & agent$agentID$agentID==1)agent$agentID$state="i"
+        
+    }
+    
+    #if there is enough info to create a network 
+    if(step > network_agg_time){
+      
+      #set threshold for considering a threat
+      if(threshold_type == "quant"){
+        if(measureFun==1)measure_threshod = quantile(obs_degree,1-threat_threshold)
+        if(measureFun==2)measure_threshod = quantile(obs_bet,1-threat_threshold)
+      } else if(threshold_type == "fixed") {
+        if(measureFun==1)measure_threshod = threat_threshold
+        if(measureFun==2)measure_threshod = threat_threshold
+      } else if(threshold_type == "pop"){
+        if(measureFun==1)measure_threshod = vcount(net_obs[[1]]) * threat_threshold
+        if(measureFun==2)measure_threshod = (vcount(net_obs[[1]])*(vcount(net_obs[[1]])-1)) * threat_threshold
+      } else if(threshold_type == "numb"){
+        if(length(obs_degree)> threat_threshold) {
+          print("warning: number of threats larger than number of users!!")
+          threat_threshold = length(obs_degree)
+        }
+        if(measureFun==1)measure_threshod = names(sort(obs_degree)[(length(obs_degree)-threat_threshold):length(obs_degree)])
+        if(measureFun==2)measure_threshod = names(sort(obs_bet)[(length(obs_bet)-threat_threshold):length(obs_bet)]) 
+      } else if(threshold_type == "top_per"){
+        cutoff = round(length(obs_degree) * (1-threat_threshold))
+        if(measureFun==1)measure_threshod = names(sort(obs_degree)[cutoff:length(obs_degree)])
+        if(measureFun==2)measure_threshod = names(sort(obs_bet)[cutoff:length(obs_bet)]) 
+      }
+      
+      
+      #individual specific information
+      number_threats <- 0
+      for(i in 1:length(full_agent_list)){
+        
+        #Get agent
+        agent.temp<- full_agent_list[[i]][1]
+        
+        #set network measures
+        vert <- which((V(net_obs[[1]])$name==agent.temp$agentID$agentID)==TRUE)
+        
+        #if i've got the app get info about where i'm at in the network
+        if(length(vert)>0 & agent.temp$agentID$app==1 & length(obs_bet)>1){
+          
+          #set my betweeness
+          mybet = obs_bet[vert] 
+          
+          #set my threat level
+          mydeg = obs_degree[vert] 
+          
+          if(threshold_type != "numb" & threshold_type != "top_per"){
+          
+            if(measureFun==1)mythreat = ifelse(mydeg > measure_threshod  , 1,0)
+            if(measureFun==2)mythreat = ifelse(mybet > measure_threshod  , 1,0)  
+            
+          } else {
+            
+            mythreat = ifelse(vert %in% measure_threshod, 1, 0)
+            
+          }
+          
+          
+          #mythreat = ifelse(mybet > 5 , 1,0)
+          if(mythreat==1){
+            number_threats<-number_threats+1
+            #print(paste0("YES threat: ID = ",agent.temp$agentID$agentID, ", measure = ",mydeg))
+          }
+          
+          #set my threat
+          agent.temp$agentID$setMyThreat(mythreat)  
+          
+          #if(mydeg>0)print(paste0("My deg ",mydeg," and prop of contact/pop ",mydeg / (p*length(full_agent_list))," which leads to a threat level of ",mythreat))
+          
+        } else {
+          agent.temp$agentID$setMyThreat(0)  
+          
+          #print(paste0("NO threat: ID = ",agent.temp$agentID$agentID, ", measure = ",mydeg))
+        }
+        
+        #print(agent.temp$agentID$betweennessDelta)
+        
+        #if the health agency has reached it's max threat threshold stop issuing elevated risk warnings
+        if(number_threats>=threat_threshold & threshold_type == "numb") break
+      }
+    }
+    
+    #save info from each run
+    df.global.net <- plyr::rbind.fill(df.global.net, data.frame(comp = number_of_components, bet=global_mean_bet, length = global_mean_length, density = global_density, deg= global_mean_degree, mod = global_modularity, mod_groups = global_groups , tran = global_clustering ,obs_comp = obs_number_of_components, obs_bet=obs_mean_bet,obs_deg=obs_mean_degree, obs_length = obs_mean_length, obs_density = obs_density, obs_mod = obs_modularity, obs_mod_groups = obs_groups, obs_clustering = obs_clustering, time = step, threats=number_threats, suceptible=nsuc, infected=ninf, recovered=nrec,true_obs_similiarity=net_similarity))
+    
+    if(randomize == TRUE){
+      df_rand <- plyr::rbind(df_rand, calculate_random_tran_length() )
+    }
+    
+    #record infection statistics
+    df_infection_stats <- bind_rows(df_infection_stats, data.frame(s=nsuc,i=ninf,r=nrec,time=step))
+    
+    #reset the counts of infection stats
+    nsuc<-0
+    ninf<-0
+    nrec<-0
+    
+    
+    #update progress bar
+    setTxtProgressBar(pb,step)
+    
+  }
+  
+  if(randomize == TRUE){
+    return(list(df.global.net, df_rand))
+  }
+  
+  if(return_infection_stats==TRUE & return_last_net == TRUE){
+    return(list(df.global.net, net_obs[[1]], df_infection_stats))
+  }
+  
+  if(return_last_net == TRUE){
+    return(list(df.global.net, net_obs[[1]]) )
+  }
+  
+  if(return_infection_stats==TRUE){
+    return(list(df.global.net, df_infection_stats))
+  }
+  
+  return(df.global.net)
+  
+}
+
+
+```
+
+
+# Q0: how long to run (stability), and general debugging (do the results make sense? visualize)
+
+
+Run one abm and visualize how things change... 
+
+First create the env and agents
+```{r one run}
+#create env
+df.env <- create_env(numbHomes = 100,numbWork = c(15,0),numbEnt = c(15,0),numbtrans = 15)
+
+#plot env
+df.env$sizeT = 1
+df.env$sizeT = ifelse((df.env$type=="Home" | df.env$type=="Work"),1.2,df.env$sizeT)
+ggplot(df.env, aes(x=x,y=y, color=type, shape=type )) + geom_point() + theme_classic()
+
+#create agents
+full_agent_list<-NULL
+full_agent_list<-create_agents(df.env,agents_in_home = 2, prob_car = 0.8, beha_adj = 1.0, prop_app=1.0)
+
+#make agent(s) infectious
+full_agent_list[[1]]$agentID$state="i"
+full_agent_list[[2]]$agentID$state="s"
+full_agent_list[[3]]$agentID$state="s"
+```
+
+
+Next run a simulation
+```{r}
+set.seed(1231)
+#run program
+test_net <- run_sim_para(full_agent_list,df.env=df.env,num_steps=60,network_agg_time=10, plotNum = 290, threat_threshold = 0)
+set.seed(1231)
+
+test_net_bet <- run_sim_para(full_agent_list,df.env=df.env,num_steps=60,network_agg_time=10, plotNum = 10, threat_threshold = 5, threshold_type = "fixed", measureFun=1, trans_prob = 0.01, recover_time=14*4, suceptible_again=14*4*2)
+
+#Add this run ID
+#test_net$run=i 
+test_net_bet$thr <- 1
+test_net$thr <- 0
+test_net_all <- rbind(test_net_bet,test_net)
+
+#plots
+ggplot(test_net_all %>% filter(time>10), aes(y=threats,x=time,color=factor(thr), group=thr))+geom_line()
+ggplot(test_net_all %>% filter(time>10), aes(y=bet,x=time,color=factor(thr), group=thr))+geom_line() + geom_point(aes(x=time, y= threats) )
+ggplot(test_net_all %>% filter(time>10), aes(y=length,x=time,color=factor(thr), group=thr))+geom_line() + geom_point(aes(x=time, y= threats) )
+ggplot(test_net_all %>% filter(time>10), aes(y=mod_groups,x=time,color=factor(thr), group=thr))+geom_line() + geom_point(aes(x=time, y= threats) )
+
+#distribution of network value
+ggplot(test_net_all %>% filter(time>10), aes(bet,fill=factor(thr)))+geom_density(alpha=0.2)
+ggplot(test_net_all %>% filter(time>10), aes(mod,fill=factor(thr)))+geom_density(alpha=0.2)
+ggplot(test_net_all %>% filter(time>10), aes(tran,fill=factor(thr)))+geom_density(alpha=0.2)
+ggplot(test_net_all %>% filter(time>10), aes(length,fill=factor(thr)))+geom_density(alpha=0.2)
+ggplot(test_net_all %>% filter(time>10), aes(mod_groups,fill=factor(thr)))+geom_density(alpha=0.2)
+
+#summaries
+test_net_all %>% group_by(thr) %>% summarise(mean_length = mean(length), sdl = sd(length) ) 
+test_net_all %>% group_by(thr) %>% summarise(mean_bet = mean(bet), sdl = sd(bet) ) 
+```
+
+
+
+# Q1: What are the characteristics of the simulated proximity networks?
+
+How do networks generated using the ABM look like
+
+```{r}
+#make it reproducable
+set.seed(1231)
+
+#create env
+df.env <- create_env(numbHomes = 100,numbWork = c(15,0),numbEnt = c(15,0),numbtrans = 15)
+
+#plot env
+ggplot(df.env, aes(x=x,y=y, color=type,shape=factor(type) )) + geom_point() + theme_classic()
+
+#create agents
+full_agent_list<-NULL
+full_agent_list<-create_agents(df.env,agents_in_home = 2, prob_car = 0.8, beha_adj = 0.0, prop_app=1.0)
+
+#make agent(s) infectious
+full_agent_list[[1]]$agentID$state="i"
+
+#run program
+test_net_list <- run_sim_para(full_agent_list,df.env=df.env,num_steps=60,network_agg_time=10, plotNum = 10, threat_threshold = 5000, threshold_type = "fixed", measureFun=1, return_last_net = T, trans_prob = 0.05, recover_time=14*4, suceptible_again=14*4*2)
+
+#get the final network
+g=test_net_list[[2]]
+g.com<-walktrap.community(g)
+plot(g, vertex.color=g.com$membership)
+df_rand<-calculate_random_tran_length(g,n=1000,unconected=TRUE)
+
+#Get individual level characteristics
+summary(degree(g, normalized = T))
+summary(transitivity(g, "local"))
+summary(betweenness(g, weight=1/E(g)$weight, normalized = T))
+skewness(betweenness(g, weight=1/E(g)$weight))
+
+hist(betweenness(g, weight=1/E(g)$weight))
+hist(transitivity(g, "local"))
+hist(degree(g))
+
+#get threshold limits
+quantile(degree(g, normalized = T), probs = c(0.50,0.90))
+quantile(betweenness(g, weight=1/E(g)$weight, normalized = T), probs = c(0.50,0.90))
+
+
+
+
+
+#make plots
+library(ggplotify)
+library(cowplot)
+
+pbot <- plot_grid(ggplot(df_rand, aes(cc, fill="blue"))+geom_density(alpha=0.2) + geom_vline(xintercept = transitivity(g), linetype="dashed"  )+theme_classic()+theme(legend.position = "none")+labs(x="Clustering coef"),
+                  ggplot(df_rand, aes(length, fill="blue"))+geom_density(alpha=0.2) + geom_vline(xintercept = mean_distance(g,directed=FALSE,unconnected=FALSE), linetype="dashed" )+ theme_classic()+theme(legend.position = "none")+labs(x="Path Length"),
+                  ggplot(df_rand, aes(degskew, fill="blue"))+geom_density(alpha=0.2) + geom_vline(xintercept = skewness(degree(g)), linetype="dashed" ) +theme_classic()+theme(legend.position = "none")+labs(x="Degree skewness")
+                  ,ncol=3,labels=c("b)","c)","d)") )
+
+E(g)$label <- ""
+human_groups <- walktrap.community(g)
+human_groups$modularity
+#human_groups <- cluster_edge_betweenness(g)
+coords <- layout_in_circle(g, order = order( as.numeric(V(g)$name) ) )
+coords <- layout_with_kk(g)
+cowplot::plot_grid(base2grob(~plot(g,vertex.color=membership(human_groups), vertex.size = 10,vertex.label.color ="white",vertex.label=NA) ),pbot
+                   , nrow=2, labels=c("a)","") ,rel_heights = c(1, 0.5))
+
+```
+
+
+# Q2: How many users are needed to accurately estimate the contact network?
+
+Now we'd like to see how many users it takes to accurately estmimate the underlying network properties
+
+```{r prop users}
+
+#set params
+num_steps = 30
+network_agg_time = 10
+replicates = 30
+prop_seq <- seq(0.1,1,by=0.1)
+start_seed <- 1234
+
+#Store results
+df.results.propNeeded <- data.frame()
+
+#for each replicate
+for(r in 1:replicates){
+  
+  #loop through all the prop values
+  for(prop in prop_seq ){
+    
+    #set seed
+    set.seed(start_seed+r)
+    
+    #create env
+    df.env <- create_env(numbHomes = 100,numbWork = c(15,0),numbEnt = c(15,0),numbtrans = 15)
+    
+    #create agents
+    full_agent_list<-NULL
+    full_agent_list<-create_agents(df.env, agents_in_home = 2, prob_car = 0.8, beha_adj = 0.0, prop_app=prop)
+    
+    #run program
+    test_net <- run_sim_para(full_agent_list,df.env=df.env,num_steps=num_steps,network_agg_time=network_agg_time, plotNum = 25000, threat_threshold = 10000, threshold_type = "fixed",measureFun = 1, return_last_net = F, calculate_net_similarity="cosine")
+    
+    #measure similarity
+    test_net_sub <- test_net[test_net$time>network_agg_time,]
+    testbet<-cor.test(test_net_sub$obs_bet,test_net_sub$bet)
+    testlength<-cor.test(test_net_sub$obs_length,test_net_sub$length)
+    testdens<-cor.test(test_net_sub$obs_density,test_net_sub$density)
+    testmod<-cor.test(test_net_sub$mod,test_net_sub$obs_mod)
+    testtran<-cor.test(test_net_sub$tran,test_net_sub$obs_clustering)
+    
+    #save measures
+    df.results.propNeeded <- rbind(df.results.propNeeded, data.frame(cor_bet = testbet$estimate, cor_len = testlength$estimate, cor_dens = testdens$estimate, cor_mod = testmod$estimate, cor_tran = testtran$estimate , prop=prop, rep=r, similarity_net = mean(test_net$true_obs_similiarity) )  )
+    
+    print(prop)
+    
+  }
+}
+
+df.results.propNeeded
+
+#summarise
+gplot_cosine <- plot_grid(ggplot(df.results.propNeeded, aes(x=prop,y=similarity_net, group=rep)) + geom_line(col="blue",alpha=0.5) + theme_classic() + labs(y="Cosine similarity\n(Whole network)", x="Proportion of users in the population"), labels=c("a)")  )
+
+#plot results
+pgrid<-plot_grid(
+  ggplot(df.results.propNeeded, aes(x=prop,y=cor_len, group=rep)) + geom_line(col="blue",alpha=0.5) + theme_classic() + labs(y="Cosine similarity\n(Path length)", x="Proportion of users in the population"),
+  ggplot(df.results.propNeeded, aes(x=prop,y=cor_tran, group=rep)) + geom_line(col="blue",alpha=0.5) + theme_classic()+ labs(y="Cosine similarity\n(Transitivity)", x="Proportion of users in the population"),
+  nrow=1, labels=c("b)","c)"))
+
+plot_grid(gplot_cosine,pgrid,nrow=2)
+
+```
+
+
+```{r}
+df.results.propNeeded %>% filter(prop>=0.79 & prop <= 0.81) %>% summarize(mean(similarity_net), low = HDInterval::hdi(similarity_net)[1], hig = HDInterval::hdi(similarity_net)[2] )
+```
+
+
+# Q3: Which measures of risk are more effective at shaping the proximity network?
+
+Now let's run the simulation with different threshold levels and see if local or global measures are more efficient at reducing spread!
+
+Test how efficient a direct measure is at reducing spread
+```{r direct measure test}
+
+#set params
+num_steps = 100
+network_agg_time = 10
+replicates = 30
+prop <- 1.0
+thresh_seq <- c(1000000,seq(0.09547739,0.1859296,length.out = 5)) #the 100000 is just to have one sim with no risk threats
+start_seed <- 1268
+
+#Store results
+df.results.local.effi <- data.frame()
+
+for(rep in 1:replicates){
+
+    #change prop
+  for(thresh in thresh_seq){
+    
+    #set seed
+    rn<-start_seed + rep
+    set.seed(rn)
+    
+    #create env
+    df.env <- create_env(numbHomes = 100,numbWork = c(15,0),numbEnt = c(15,0),numbtrans = 15)
+    
+    #create agents
+    full_agent_list<-NULL
+    full_agent_list<-create_agents(df.env,agents_in_home = 2, prob_car = 0.8, beha_adj = 0.5, prop_app=prop)
+    
+    #make agent(s) infectious
+    #full_agent_list[[1]]$agentID$state="i"
+    
+    #run program with app threat information
+    test_net_app <- run_sim_para(full_agent_list,df.env=df.env,num_steps=num_steps,network_agg_time=network_agg_time, plotNum = 250000, return_last_net = F, threat_threshold = thresh, threshold_type = "fixed", measureFun=1, trans_prob = 0.05, recover_time=14*4, suceptible_again=14*4*2, return_infection_stats = T, introduce_infection = 50)
+    
+    #measure network and infection stats
+    diff_length <- test_net_app[[1]]$length
+    diff_tran<- test_net_app[[1]]$tran
+    diff_bet <- test_net_app[[1]]$bet
+    diff_modNum <- test_net_app[[1]]$mod_groups
+    diff_inf<- (test_net_app[[2]]$i)
+    tot_threats <- test_net_app[[1]]$threats
+    
+    #record baseline infections
+    if(thresh==1000000){
+      baseline <- as.vector(diff_inf)
+      print("baseline!")
+    }
+    
+    #save
+    df.results.local.effi <- rbind(df.results.local.effi, data.frame(length = diff_length, tran = diff_tran, bet = diff_bet, modNum=diff_modNum, prop=prop, time = test_net_app[[1]]$time, inf = diff_inf, rep=rep, baseline_inf = baseline, thresh=thresh,threats=tot_threats)  )
+    
+    print(prop)
+    
+  }
+  
+}
+
+#take a look
+df.results.local.effi
+
+
+```
+
+Estimate efficiency
+```{r direct efficiency}
+##
+#get the reduced infection observed, number of threats, and efficency of each simulation
+##
+
+#add a grouping for each threshold and repitition
+df.results.local.effi<- df.results.local.effi %>% mutate(thresh_rep = paste0(thresh,"_",rep))
+
+#get the summary of each threshold and repitition combo
+df.sum.local.effi <- df.results.local.effi %>% filter(time>50) %>% group_by(thresh_rep) %>% summarise(sum_diff_baseline = mean(inf - baseline_inf ), sum_threats = sum(threats), thresh=mean(thresh), bet_mean = mean(bet), length_mean = mean(length), mod_mean = mean(modNum) , max_inf = max(inf))
+
+#plot the summary of reduced infections
+p.direct.max_inf <- ggplot(df.sum.local.effi %>% filter(thresh<100), aes(x=as.factor(thresh), y=max_inf)) + geom_violin() 
+
+#plot the summary of number of threats 
+p.direct.threats <- ggplot(df.sum.local.effi %>% filter(thresh<100), aes(x=as.factor(thresh), y=sum_threats)) + geom_violin()
+
+#plot the summary of efficiency
+df.sum.local.effi <- df.sum.local.effi %>% mutate(eff=sum_threats/(200-max_inf))
+p.direct.effic <- ggplot(df.sum.local.effi %>% filter(thresh<100), aes(x=(thresh), group=as.factor(thresh), y=eff)) + geom_boxplot() + ylim(0,175) #+ geom_hline(yintercept = 0.01, line="dashed")
+
+cowplot::plot_grid(p.direct.max_inf,p.direct.threats,p.direct.effic,nrow=3)
+```
+
+Plot propogation of infection 
+```{r direct traces}
+
+#individual traces
+#ggplot(df.results.local.effi %>% filter(rep==3), aes(x=time, y=inf, group=thresh_rep, color=as.factor(thresh) ) ) + geom_line()
+#ggplot(df.results.local.effi %>% filter(rep==3), aes(x=time, y=length, group=thresh_rep, color=as.factor(thresh) ) ) + geom_line()
+
+#mean traces
+df.mean.trends <- df.results.local.effi %>% filter(time>10) %>% mutate(thresh_time = paste0(thresh,"_",time) ) %>% group_by(thresh_time) %>% summarize(inf_mean_time = mean(inf), time = mean(time), thresh = mean(thresh), length_mean = mean(length) , bet_mean = mean(bet), threats_mean = mean(threats))
+
+#look at infection trends
+p.direct.curves <- ggplot(df.mean.trends, aes(x=time, y=inf_mean_time, color=as.factor(round(thresh,2) ) ) ) + geom_line() + labs(x="Time",y="Infected",color="Threshold")
+
+#look at app trends
+#ggplot(df.mean.trends, aes(x=time, y=threats_mean, color=as.factor(round(thresh,2) ) ) ) + geom_line()
+
+#look at network trends
+p.direct.avgPath <- ggplot(df.mean.trends, aes(x=time, y=length_mean, color=as.factor(round(thresh,2) ) ) ) + geom_line()+ labs(x="Time",y="Average path length",color="Threshold")
+p.direct.avgBet <- ggplot(df.mean.trends, aes(x=time, y=bet_mean, color=as.factor(round(thresh,2) ) ) ) + geom_line()+ labs(x="Time",y="Average betweenness",color="Threshold")
+
+#make a figure for the MS
+p.net.changes <- cowplot::plot_grid(p.direct.avgPath,p.direct.avgBet, ncol=2, labels = c("b)","c)"))
+
+cowplot::plot_grid(p.direct.curves,p.net.changes,labels = c("a)",""), nrow=2)
+```
+
+
+Test efficiency of a indirect measure at reducing spread
+
+```{r indirect measure test}
+
+#set params
+num_steps = 100
+network_agg_time = 10
+replicates = 30
+prop <- 1.0
+thresh_seq <- c(1000000,seq(0.005247196,0.023014060,length.out = 5)) #the 100000 is just to have one sim with no risk threats
+start_seed <- 1268
+
+#Store results
+df.results.local.effi.indirect <- data.frame()
+
+for(rep in 1:replicates){
+
+    #change prop
+  for(thresh in thresh_seq){
+    
+    #set seed
+    rn<-start_seed + rep
+    set.seed(rn)
+    
+    #create env
+    df.env <- create_env(numbHomes = 100,numbWork = c(15,0),numbEnt = c(15,0),numbtrans = 15)
+    
+    #create agents
+    full_agent_list<-NULL
+    full_agent_list<-create_agents(df.env,agents_in_home = 2, prob_car = 0.8, beha_adj = 0.5, prop_app=prop)
+    
+    #make agent(s) infectious
+    #full_agent_list[[1]]$agentID$state="i"
+    
+    #run program with app threat information
+    test_net_app <- run_sim_para(full_agent_list,df.env=df.env,num_steps=num_steps,network_agg_time=network_agg_time, plotNum = 250000, return_last_net = F, threat_threshold = thresh, threshold_type = "fixed", measureFun=2, trans_prob = 0.05, recover_time=14*4, suceptible_again=14*4*2, return_infection_stats = T, introduce_infection = 50)
+    
+    #measure network and infection stats
+    diff_length <- test_net_app[[1]]$length
+    diff_tran<- test_net_app[[1]]$tran
+    diff_bet <- test_net_app[[1]]$bet
+    diff_modNum <- test_net_app[[1]]$mod_groups
+    diff_inf<- (test_net_app[[2]]$i)
+    tot_threats <- test_net_app[[1]]$threats
+    
+    #record baseline infections
+    if(thresh==1000000){
+      baseline <- as.vector(diff_inf)
+      print("baseline!")
+    }
+    
+    #save
+    df.results.local.effi.indirect <- rbind(df.results.local.effi.indirect, data.frame(length = diff_length, tran = diff_tran, bet = diff_bet, modNum=diff_modNum, prop=prop, time = test_net_app[[1]]$time, inf = diff_inf, rep=rep, baseline_inf = baseline, thresh=thresh,threats=tot_threats)  )
+    
+    print(prop)
+    
+  }
+  
+}
+
+#take a look
+df.results.local.effi.indirect
+
+
+
+```
+
+
+```{r}
+##
+#get the reduced infection observed, number of threats, and efficency of each simulation
+##
+
+#add a grouping for each threshold and repitition
+df.results.local.effi.indirect<- df.results.local.effi.indirect %>% mutate(thresh_rep = paste0(thresh,"_",rep))
+
+#get the summary of each threshold and repitition combo
+df.sum.local.effi.indirect <- df.results.local.effi.indirect %>% filter(time>50) %>% group_by(thresh_rep) %>% summarise(sum_diff_baseline = sum(inf - baseline_inf ), sum_threats = sum(threats), thresh=mean(thresh), bet_mean = mean(bet), length_mean = mean(length), mod_mean = mean(modNum), max_inf = max(inf) )
+
+
+#plot the summary of reduced infections
+p.indirect.max_inf <- ggplot(df.sum.local.effi.indirect %>% filter(thresh<100), aes(x=as.factor(thresh), y=max_inf)) + geom_violin()
+
+#plot the summary of number of threats 
+p.indirect.threats <- ggplot(df.sum.local.effi.indirect %>% filter(thresh<100), aes(x=as.factor(thresh), y=sum_threats)) + geom_violin()
+
+#plot the summary of efficiency
+ggplot(df.sum.local.effi.indirect %>% filter(thresh<100), aes(x=thresh, y=sum_diff_baseline/sum_threats)) + geom_point()
+
+p.indirect.effic <- ggplot(df.sum.local.effi.indirect %>% filter(thresh<100), aes(x=(thresh), group=as.factor(thresh), y=(200-max_inf)/sum_threats)) + geom_violin() + ylim(0,0.05) + geom_hline(yintercept = 0.01, line="dashed")
+
+
+df.sum.local.effi.indirect <- df.sum.local.effi.indirect %>% mutate(eff=sum_threats/(200-max_inf))
+p.indirect.effic <- ggplot(df.sum.local.effi.indirect %>% filter(thresh<100), aes(x=(thresh), group=as.factor(thresh), y=sum_threats/(200-max_inf) )) + geom_boxplot() + ylim(0,175) #+ geom_hline(yintercept = 0.01, line="dashed")
+
+#cowplot::plot_grid(p.indirect.max_inf,p.indirect.threats,p.indirect.effic,nrow=3)
+
+```
+
+Compare efficiency
+```{r}
+cowplot::plot_grid(p.direct.effic + 
+                     labs(title="Degree threshold",y="Warnings per reduced infection", x="Threshold"),
+                   p.indirect.effic + 
+                     labs(title="Betweenness threshold", y="Warnings per reduced infection", x="Threshold")
+                   )
+```
+
+How does different thresholds change the network structure
+```{r traces}
+
+#mean traces
+df.mean.trends.ind <- df.results.local.effi.indirect %>% filter(time>10) %>% mutate(thresh_time = paste0(thresh,"_",time) ) %>% group_by(thresh_time) %>% summarize(inf_mean_time = mean(inf), time = mean(time), thresh = mean(thresh), length_mean = mean(length) , bet_mean = mean(bet), threats_mean = mean(threats))
+
+#look at infection trends
+p.indirect.curves <- ggplot(df.mean.trends.ind, aes(x=time, y=inf_mean_time, color=as.factor(round(thresh,3) ) ) ) + geom_line()+ labs(x="Time",y="Infections",color="Threshold")
+
+#look at app trends
+#ggplot(df.mean.trends.ind, aes(x=time, y=threats_mean, color=as.factor(thresh) ) ) + geom_line()
+
+#look at network trends
+p.indirect.avgPath <- ggplot(df.mean.trends.ind, aes(x=time, y=length_mean, color=as.factor(round(thresh,3)) ) ) + geom_line()+ labs(x="Time",y="Average path length",color="Threshold")
+p.indirect.avgBet <- ggplot(df.mean.trends.ind, aes(x=time, y=bet_mean, color=as.factor(round(thresh,3)) ) ) + geom_line()+ labs(x="Time",y="Average betweenness",color="Threshold")
+
+
+#make a figure for the MS
+p.net.changes <- cowplot::plot_grid(p.indirect.avgPath,p.indirect.avgBet, ncol=2, labels = c("b)","c)"))
+
+cowplot::plot_grid(p.indirect.curves,p.net.changes,labels = c("a)",""), nrow=2)
+
+```
+
+
+# Q4: How many users are needed to shape the contact network?
+
+Despite not knowing the true underlying prxoimity network, is there enough information to shape the network and reduce the spread of disease? Try using a direct and indirect measure to see how they work.
+
+Test how reducing the proportion of the pop using the app impacts spread
+```{r prop test}
+#set params
+num_steps = 100
+network_agg_time = 10
+replicates = 30
+prop_seq <- seq(0,1,by=0.1)
+start_seed <- 1267
+thresh <- 0.5#0.3 #0.02 #0.0955
+
+#Store results
+df.results.changeDetected <- data.frame()
+
+for(rep in 1:replicates){
+  
+  #change prop
+  for(prop in prop_seq){
+    
+    #set seed
+    rn<-start_seed + rep
+    set.seed(rn)
+    
+    #create env
+    df.env <- create_env(numbHomes = 100,numbWork = c(15,0),numbEnt = c(15,0),numbtrans = 15)
+    
+    #create agents
+    full_agent_list<-NULL
+    full_agent_list<-create_agents(df.env,agents_in_home = 2, prob_car = 0.8, beha_adj = 0.5, prop_app=prop)
+    
+    #run program with app threat information
+    test_net_app <- run_sim_para(full_agent_list,df.env=df.env,num_steps=num_steps,network_agg_time=network_agg_time, plotNum = 250000, return_last_net = F, threat_threshold = thresh, threshold_type = "top_per", measureFun=1, trans_prob = 0.05, recover_time=14*4, suceptible_again=14*4*2, return_infection_stats = T, introduce_infection = 50)
+    
+    #measure network and infection stats
+    diff_length <- test_net_app[[1]]$length
+    diff_tran<- test_net_app[[1]]$tran
+    diff_bet <- test_net_app[[1]]$bet
+    diff_modNum <- test_net_app[[1]]$mod_groups
+    inf<- (test_net_app[[2]]$i)
+    tot_threats <- test_net_app[[1]]$threats
+    
+    #record baseline infections
+    if(prop==0){
+      baseline <- as.vector(diff_inf)
+      print("baseline!")
+    }
+    
+    #save
+    df.results.changeDetected <- rbind(df.results.changeDetected, data.frame(diff_length = diff_length, diff_tran = diff_tran, diff_bet = diff_bet, diff_modNum=diff_modNum, prop=prop, time = test_net_app[[1]]$time, inf = inf, threats=tot_threats, rep=rep, baseline_inf = baseline)  )
+    
+    print(prop)
+    
+  }
+  
+}
+
+df.results.changeDetected
+
+```
+
+
+```{r how the network changed}
+#create grouping var
+df.results.changeDetected$grp <- paste0(df.results.changeDetected$rep,"_",df.results.changeDetected$prop)
+
+
+#plot individual run results
+plot_grid(
+  ggplot(df.results.changeDetected, aes(x=time,group=grp,color=as.factor(prop),y=diff_length)) + geom_line() + theme_classic() + labs(y="Path length"),
+  ggplot(df.results.changeDetected, aes(x=time,group=grp,color=as.factor(prop),y=diff_bet)) + geom_line() + theme_classic() + labs(y="Avg Betweenness"),
+  nrow=3, labels=c("a)","b)"))
+
+
+#plot means of the runs
+df.results.changeDetected$prptime <- paste0(df.results.changeDetected$prop,"_",df.results.changeDetected$time)
+
+df.results.changeDetected.sum <- df.results.changeDetected %>% group_by(prptime) %>% summarize(meanDiffL = mean(diff_length),meanDiffT = mean(diff_tran),meanDiffB = mean(diff_bet) , prop=first(prop), time=first(time) )
+
+#table(df.results.changeDetected$prptime)
+
+plot_grid(
+  ggplot(df.results.changeDetected.sum %>% filter(time>10), aes(x=time,color=as.factor(prop),y=meanDiffL)) + geom_line() + theme_classic() + labs(y="Path length") +
+    geom_line(data=df.results.changeDetected.sum %>% filter(prop==0 &time>10),color="grey50",size=1),
+  ggplot(df.results.changeDetected.sum %>% filter(time>10), aes(x=time,color=as.factor(prop),y=meanDiffB)) + geom_line() + theme_classic() + labs(y="Avg betweenness")+
+    geom_line(data=df.results.changeDetected.sum %>% filter(prop==0 &time>10),color="grey50",size=1), 
+  nrow=1, labels=c("a)","b)"))
+
+
+```
+
+Infections
+```{r how infections changed}
+
+#create grouping variable by rep and prop
+df.results.changeDetected$prpRep <- paste0(df.results.changeDetected$prop,"_",df.results.changeDetected$rep)
+
+#lineplot of individual runs
+ggplot(df.results.changeDetected , aes(x=time,group=as.factor(prpRep),color=prop,y=inf)) + geom_line() + theme_classic() + geom_hline(yintercept = 0, linetype="dashed") 
+
+
+#####plot the difference between infections at a time point and infections with zero app users
+df.results.changeDetected <- df.results.changeDetected %>% mutate(diff_baseline = inf-baseline_inf)
+
+#line plot
+#ggplot(df.results.changeDetected , aes(x=time,group=as.factor(prpRep),color=prop,y=diff_baseline)) + geom_line() + theme_classic() + geom_hline(yintercept = 0, linetype="dashed")+ scale_fill_brewer(palette = "Reds") 
+
+#violin plot
+#ggplot(df.results.changeDetected %>% filter(time>60 & time < 80) , aes(x=as.factor(prop),y=inf)) + geom_violin() + theme_classic() + geom_hline(yintercept = 0, linetype="dashed")
+
+
+#plot the mean infections at a time point and infections with zero app users
+df.results.changeDetected.mean <- df.results.changeDetected %>% group_by(prptime) %>% summarize(mean_diff = mean(diff_baseline), mean_inf = mean(inf), time = mean(time), prop = mean(prop),tot_threats = sum(threats))
+
+p.prop.direct <- ggplot(df.results.changeDetected.mean %>% filter(time>50) , aes(x=time,group=as.factor(prop),color=as.factor(prop),y=mean_inf)) +
+  geom_line() + theme_classic() + labs(y="Number of Infections") #+
+  #geom_line(data=df.results.changeDetected.mean%>%filter(prop==0 & time > 50),color="grey50",size=1)
+p.prop.direct
+```
+
+```{r}
+df.results.changeDetected.effi <- df.results.changeDetected %>% mutate(grptemp = paste0(rep,"_",prop) ) %>% group_by(grptemp) %>% summarize(max_inf = max(inf), prop = mean(prop),tot_threats = sum(threats))
+
+p.prop.direct.eff <- ggplot(df.results.changeDetected.effi%>% filter(prop!=0 & max_inf > 2), aes(x=as.factor(prop),y=tot_threats/(200-max_inf) ) )+ geom_boxplot()+ labs(x="Proportion of users", y="Warnings per reduced infection")
+
+p.prop.direct.eff
+```
+
+
+
+
+
+Test how reducing the proportion of the pop using the app impacts spread: indirect
+
+```{r prop test indirect}
+#set params
+num_steps = 100
+network_agg_time = 10
+replicates = 30
+prop_seq <- seq(0,1,by=0.1)
+start_seed <- 1267
+thresh <- 0.5 #0.3 #30 #0.023014060 #0.005247196 #
+
+#Store results
+df.results.changeDetected.ind <- data.frame()
+
+for(rep in 1:replicates){
+  
+  #change prop
+  for(prop in prop_seq){
+    
+    #set seed
+    rn<-start_seed + rep
+    set.seed(rn)
+    
+    #create env
+    df.env <- create_env(numbHomes = 100,numbWork = c(15,0),numbEnt = c(15,0),numbtrans = 15)
+    
+    #create agents
+    full_agent_list<-NULL
+    full_agent_list<-create_agents(df.env,agents_in_home = 2, prob_car = 0.8, beha_adj = 0.5, prop_app=prop)
+    
+    #run program with app threat information
+    test_net_app <- run_sim_para(full_agent_list,df.env=df.env,num_steps=num_steps,network_agg_time=network_agg_time, plotNum = 250000, return_last_net = F, threat_threshold = thresh, threshold_type = "top_per", measureFun=2, trans_prob = 0.05, recover_time=14*4, suceptible_again=14*4*2, return_infection_stats = T, introduce_infection = 50)
+    
+    #measure network and infection stats
+    diff_length <- test_net_app[[1]]$length
+    diff_tran<- test_net_app[[1]]$tran
+    diff_bet <- test_net_app[[1]]$bet
+    diff_modNum <- test_net_app[[1]]$mod_groups
+    inf<- (test_net_app[[2]]$i)
+    tot_threats <- test_net_app[[1]]$threats
+    
+    #record baseline infections
+    if(prop==0){
+      baseline <- as.vector(diff_inf)
+      print("baseline!")
+    }
+    
+    #save
+    df.results.changeDetected.ind <- rbind(df.results.changeDetected.ind, data.frame(diff_length = diff_length, diff_tran = diff_tran, diff_bet = diff_bet, diff_modNum=diff_modNum, prop=prop, time = test_net_app[[1]]$time, inf = inf, threats=tot_threats, rep=rep, baseline_inf = baseline)  )
+    
+    print(prop)
+    
+  }
+  
+}
+
+df.results.changeDetected.ind
+
+```
+
+
+```{r how the network changed}
+#create grouping var
+df.results.changeDetected.ind$grp <- paste0(df.results.changeDetected.ind$rep,"_",df.results.changeDetected.ind$prop)
+
+
+#plot individual run results
+plot_grid(
+  ggplot(df.results.changeDetected.ind, aes(x=time,group=grp,color=as.factor(prop),y=diff_length)) + geom_line() + theme_classic() + labs(y="Path length"),
+  ggplot(df.results.changeDetected.ind, aes(x=time,group=grp,color=as.factor(prop),y=diff_bet)) + geom_line() + theme_classic() + labs(y="Avg Betweenness"),
+  nrow=3, labels=c("a)","b)"))
+
+
+#plot means of the runs
+df.results.changeDetected.ind$prptime <- paste0(df.results.changeDetected.ind$prop,"_",df.results.changeDetected.ind$time)
+
+df.results.changeDetected.ind.sum <- df.results.changeDetected.ind %>% group_by(prptime) %>% summarize(meanDiffL = mean(diff_length),meanDiffT = mean(diff_tran),meanDiffB = mean(diff_bet) , prop=first(prop), time=first(time) )
+
+#table(df.results.changeDetected.ind$prptime)
+
+plot_grid(
+  ggplot(df.results.changeDetected.ind.sum %>% filter(time>10), aes(x=time,color=as.factor(prop),y=meanDiffL)) + geom_line() + theme_classic() + labs(y="Path length") +
+    geom_line(data=df.results.changeDetected.ind.sum %>% filter(prop==0 &time>10),color="grey50",size=1),
+  ggplot(df.results.changeDetected.ind.sum %>% filter(time>10), aes(x=time,color=as.factor(prop),y=meanDiffB)) + geom_line() + theme_classic() + labs(y="Avg betweenness")+
+    geom_line(data=df.results.changeDetected.ind.sum %>% filter(prop==0 &time>10),color="grey50",size=1), 
+  nrow=1, labels=c("a)","b)"))
+
+
+```
+Infections
+```{r how infections changed}
+
+#create grouping variable by rep and prop
+df.results.changeDetected.ind$prpRep <- paste0(df.results.changeDetected.ind$prop,"_",df.results.changeDetected.ind$rep)
+
+#lineplot of individual runs
+ggplot(df.results.changeDetected.ind , aes(x=time,group=as.factor(prpRep),color=as.factor(prop),y=inf)) + geom_line(alpha=0.2) + theme_classic() + geom_hline(yintercept = 0, linetype="dashed") 
+
+
+#####plot the difference between infections at a time point and infections with zero app users
+df.results.changeDetected.ind <- df.results.changeDetected.ind %>% mutate(diff_baseline = inf-baseline_inf)
+
+#line plot
+#ggplot(df.results.changeDetected.ind , aes(x=time,group=as.factor(prpRep),color=prop,y=diff_baseline)) + geom_line() + theme_classic() + geom_hline(yintercept = 0, linetype="dashed")+ scale_fill_brewer(palette = "Reds") 
+
+#violin plot
+#ggplot(df.results.changeDetected.ind %>% filter(time>60 & time < 80) , aes(x=as.factor(prop),y=inf)) + geom_violin() + theme_classic() + geom_hline(yintercept = 0, linetype="dashed")
+
+
+#plot the mean infections at a time point and infections with zero app users
+df.results.changeDetected.ind.mean <- df.results.changeDetected.ind %>% group_by(prptime) %>% summarize(mean_diff = mean(diff_baseline), mean_inf = mean(inf), time = mean(time), prop = mean(prop))
+
+p.prop.indirect <- ggplot(df.results.changeDetected.ind.mean %>% filter(time>50) , aes(x=time,group=as.factor(prop),color=as.factor(prop),y=mean_inf)) +
+  geom_line() + theme_classic() + labs(y="Number of Infections") #+
+  #geom_line(data=df.results.changeDetected.ind.mean%>%filter(prop==0 & time > 50),color="grey50",size=1)
+p.prop.indirect
+```
+
+
+Test efficiency
+```{r}
+df.results.changeDetected.ind.effi <- df.results.changeDetected.ind %>% mutate(grptemp = paste0(rep,"_",prop) ) %>% group_by(grptemp) %>% summarize(max_inf = max(inf), prop = mean(prop),tot_threats = sum(threats)) %>% mutate(eff=tot_threats/(200-max_inf))
+
+ggplot(df.results.changeDetected.ind.effi, aes(x=as.factor(prop),y=max_inf ) )+ geom_point()
+ggplot(df.results.changeDetected.ind.effi, aes(x=(prop),y=tot_threats ) )+ geom_point() + geom_abline(intercept = 0.0, slope=200*100) + ylim(0,200*100)
+
+p.prop.indirect.eff<-ggplot(df.results.changeDetected.ind.effi %>% filter(prop!=0 & max_inf > 2), aes(x=as.factor(prop),y=eff ) )+ geom_boxplot() + labs(x="Proportion of users", y="Warnings per reduced infection")
+
+p.prop.indirect.eff
+
+```
+
+
+Compare results
+
+```{r}
+cowplot::plot_grid(p.prop.direct,p.prop.indirect,p.prop.direct.eff+ylim(0,650),p.prop.indirect.eff+ylim(0,650),
+                   labels = c("a)","b)","c)","d)"))
+```
